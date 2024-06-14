@@ -162,19 +162,31 @@ def compute_metrics(x_hr, pred_audio):
 
 
 def overlap_add(x, win_len, hop_size, target_shape):
-    # target.shape = (B, C, seq_len)
-    # x.shape = (B*n_chunks, C, win_len) , n_chunks = (seq_len - hop_size)/(win_len - hop_size)
     bs, channels, seq_len = target_shape
-    hann_windows = torch.ones(x.shape, device=x.device) * torch.hann_window(win_len, device=x.device)
-    hann_windows[0, :, :hop_size] = 1
-    hann_windows[-1, :, -hop_size:] = 1
+    # Create Hann window
+    hann_window = torch.hann_window(win_len, device=x.device).view(1, 1, -1)
+    hann_windows = torch.ones_like(x) * hann_window
+    # Apply Hann window to x
     x *= hann_windows
+    # Reshape for folding
     x = x.permute(1, 0, 2).reshape(bs * channels, -1, win_len).permute(0, 2, 1)  # B*C, win_len, n_chunks
+    # Fold operation
     fold = torch.nn.Fold(output_size=(1, seq_len), kernel_size=(1, win_len), stride=(1, hop_size))
-    x = fold(x)  # B*C, 1, 1, seq_len
-    x = x.reshape(channels, bs, seq_len).permute(1, 0, 2)  # B, C, seq_len
-    return x
+    x_folded = fold(x)  # B*C, 1, 1, seq_len
+    # Reshape to target shape
+    x_folded = x_folded.view(channels, bs, seq_len).permute(1, 0, 2)  # B, C, seq_len
+    # Create normalization window
+    norm_window = torch.zeros(seq_len, device=x.device)
+    window = torch.hann_window(win_len, device=x.device)
+    # Calculate the normalization factor by summing window contributions
+    for i in range(0, seq_len, hop_size):
+        norm_window[i:i + win_len] += window[:min(win_len, seq_len - i)]
+    # Normalize the reconstructed signal
+    norm_window[norm_window == 0] = 1  # Prevent division by zero
+    norm_window = norm_window.view(1, 1, -1)
+    x_folded /= norm_window
 
+    return x_folded
 
 def evaluate_dataset(model, test_loader, sample_path, eval_input=False):
     window_size, stride, sr = test_loader.dataset.window, test_loader.dataset.stride, test_loader.dataset.sr
